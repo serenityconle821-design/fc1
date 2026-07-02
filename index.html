@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>亚马逊专用否词批量生成系统 | Amazon PPC Automation</title>
+    <title>亚马逊全能否词引擎 | 词/品自动分流架构</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -22,7 +22,7 @@
 
         function App() {
             const [status, setStatus] = useState("等待上传源文件 (CSV/XLSX)...");
-            const [stats, setStats] = useState({ total: 0, valid: 0, skipped: 0 });
+            const [stats, setStats] = useState({ total: 0, keywords: 0, asins: 0, skipped: 0 });
             const [processedData, setProcessedData] = useState(null);
             const fileInputRef = useRef(null);
 
@@ -36,12 +36,10 @@
                 reader.onload = (evt) => {
                     try {
                         const data = evt.target.result;
-                        // 强制使用 array buffer 规避长数字精度丢失
                         const workbook = XLSX.read(data, { type: 'array', raw: false }); 
                         const firstSheetName = workbook.SheetNames[0];
                         const worksheet = workbook.Sheets[firstSheetName];
                         
-                        // 解析为 JSON，保留空值
                         const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
                         
                         processAmazonData(jsonData);
@@ -49,7 +47,6 @@
                         setStatus("❌ 文件解析失败，请确保上传的是规范的表格文件。");
                         console.error(error);
                     } finally {
-                        // 突破浏览器同名文件上传拦截机制
                         if (fileInputRef.current) fileInputRef.current.value = null;
                     }
                 };
@@ -57,17 +54,17 @@
             };
 
             const processAmazonData = (data) => {
-                let validCount = 0;
+                let kwCount = 0;
+                let asinCount = 0;
                 let skippedCount = 0;
                 const outData = [];
 
                 data.forEach(row => {
-                    // 容错嗅探：兼容前后空格
                     const campName = (row['广告活动名称'] || "").toString().trim();
                     const campId = (row['Campaign ID'] || "").toString().trim();
-                    const negKeyword = (row['需否定的搜索词'] || "").toString().trim();
+                    const targetStr = (row['需否定的搜索词'] || "").toString().trim();
 
-                    if (!campName || !negKeyword) return; // 跳过空行
+                    if (!campName || !targetStr) return; // 跳过空行
 
                     // 🛑 核心防御网：精准拦截并剔除包含“简化”的活动
                     if (campName.includes("简化")) {
@@ -75,23 +72,43 @@
                         return;
                     }
 
-                    // ✅ 通过防御网，组装符合亚马逊 Bulk V3 标准的增量底层报表
-                    outData.push({
-                        "Product": "Sponsored Products",
-                        "Entity": "Campaign Negative Keyword",
-                        "Operation": "Create",
-                        "Campaign Id": campId,
-                        "Campaign Name": campName,
-                        "Keyword Text": negKeyword,
-                        "Match Type": "Negative Exact", // 默认安全策略：精准否定
-                        "State": "Enabled"
-                    });
-                    validCount++;
+                    // 🔍 ASIN 嗅探雷达 (10位数字字母组合，无空格)
+                    const isASIN = /^[A-Z0-9]{10}$/i.test(targetStr);
+
+                    if (isASIN) {
+                        // 构建 ASIN 否定行
+                        outData.push({
+                            "Product": "Sponsored Products",
+                            "Entity": "Campaign Negative Product Targeting",
+                            "Operation": "Create",
+                            "Campaign Id": campId,
+                            "Campaign Name": campName,
+                            "Keyword Text": "", // ASIN 不需要填这个
+                            "Match Type": "",   // ASIN 不需要填这个
+                            "Product Targeting Expression": `asin="${targetStr.toUpperCase()}"`, // V3 标准 ASIN 表达式
+                            "State": "Enabled"
+                        });
+                        asinCount++;
+                    } else {
+                        // 构建关键词否定行
+                        outData.push({
+                            "Product": "Sponsored Products",
+                            "Entity": "Campaign Negative Keyword",
+                            "Operation": "Create",
+                            "Campaign Id": campId,
+                            "Campaign Name": campName,
+                            "Keyword Text": targetStr,
+                            "Match Type": "Negative Exact", 
+                            "Product Targeting Expression": "", // 关键词不需要填这个
+                            "State": "Enabled"
+                        });
+                        kwCount++;
+                    }
                 });
 
                 setProcessedData(outData);
-                setStats({ total: data.length, valid: validCount, skipped: skippedCount });
-                setStatus("✅ 数据清洗与矩阵重组完成！");
+                setStats({ total: data.length, keywords: kwCount, asins: asinCount, skipped: skippedCount });
+                setStatus("✅ 词/品双轨路由清洗完成！");
             };
 
             const exportV3Excel = () => {
@@ -100,13 +117,11 @@
                     return;
                 }
 
-                // 强制要求 Sheet 名为 Sponsored Products Campaigns
                 const ws = XLSX.utils.json_to_sheet(processedData);
                 const wb = XLSX.utils.book_new();
                 XLSX.utils.book_append_sheet(wb, ws, "Sponsored Products Campaigns");
 
-                // 纯前端二进制打包写入
-                XLSX.writeFile(wb, `Amazon_Bulk_Negatives_${new Date().toISOString().slice(0,10).replace(/-/g, "")}.xlsx`);
+                XLSX.writeFile(wb, `Amazon_Negatives_Pro_${new Date().toISOString().slice(0,10).replace(/-/g, "")}.xlsx`);
                 setStatus("🚀 批量上传文件已安全导出！");
             };
 
@@ -114,22 +129,20 @@
                 <div className="min-h-screen flex items-center justify-center p-6">
                     <div className="glass-panel w-full max-w-2xl rounded-[24px] p-8 md:p-12 relative overflow-hidden">
                         
-                        {/* Apple 风头部 */}
                         <div className="text-center mb-10">
                             <h1 className="text-2xl md:text-3xl font-semibold tracking-tight mb-2">
-                                亚马逊 PPC 否词防守引擎
+                                亚马逊全能否词引擎 <span className="text-[#0071e3] text-lg align-top">V2</span>
                             </h1>
                             <p className="text-[#86868b] text-sm md:text-base">
-                                自动剔除“简化”活动 · 100% 离线计算 · 纯原生 V3 协议生成
+                                自动识别 ASIN 与关键词 · 双轨隔离写入 · 剔除“简化”活动
                             </p>
                         </div>
 
-                        {/* 交互区 */}
                         <div className="flex flex-col items-center space-y-6">
                             <label className="w-full flex flex-col items-center justify-center px-4 py-8 bg-white/50 border-2 border-dashed border-[#d2d2d7] rounded-[16px] cursor-pointer hover:bg-white/80 hover:border-[#0071e3] transition-all duration-300">
                                 <svg className="w-10 h-10 text-[#0071e3] mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
-                                <span className="text-[#1d1d1f] font-medium">点击此处上传您的表单</span>
-                                <span className="text-[#86868b] text-xs mt-1">(支持 CSV 或 XLSX 格式)</span>
+                                <span className="text-[#1d1d1f] font-medium">拖入或点击上传源表单</span>
+                                <span className="text-[#86868b] text-xs mt-1">(包含：广告活动名称、需否定的搜索词)</span>
                                 <input 
                                     type="file" 
                                     className="hidden" 
@@ -139,38 +152,35 @@
                                 />
                             </label>
 
-                            {/* 状态看板 */}
                             <div className="w-full bg-white/60 rounded-[16px] p-4 text-center border border-white/40">
                                 <p className={`text-sm font-medium ${status.includes('✅') || status.includes('🚀') ? 'text-green-600' : 'text-[#1d1d1f]'}`}>
                                     {status}
                                 </p>
                             </div>
 
-                            {/* 数据透视 */}
                             {processedData && (
                                 <div className="w-full grid grid-cols-3 gap-4 mb-4">
-                                    <div className="bg-white/70 p-4 rounded-[16px] text-center">
-                                        <p className="text-xs text-[#86868b] mb-1">总读取行数</p>
-                                        <p className="text-xl font-semibold text-[#1d1d1f]">{stats.total}</p>
-                                    </div>
                                     <div className="bg-[#fff0f0] p-4 rounded-[16px] text-center border border-red-100">
-                                        <p className="text-xs text-red-400 mb-1">自动剔除 (带"简化")</p>
-                                        <p className="text-xl font-semibold text-red-500">{stats.skipped}</p>
+                                        <p className="text-[11px] text-red-400 mb-1">已剔除 (带"简化")</p>
+                                        <p className="text-lg font-semibold text-red-500">{stats.skipped}</p>
                                     </div>
                                     <div className="bg-[#f0f9ff] p-4 rounded-[16px] text-center border border-blue-100">
-                                        <p className="text-xs text-[#0071e3] mb-1">待上传否词数</p>
-                                        <p className="text-xl font-semibold text-[#0071e3]">{stats.valid}</p>
+                                        <p className="text-[11px] text-[#0071e3] mb-1">已转 否定关键词</p>
+                                        <p className="text-lg font-semibold text-[#0071e3]">{stats.keywords}</p>
+                                    </div>
+                                    <div className="bg-[#f5f0ff] p-4 rounded-[16px] text-center border border-purple-100">
+                                        <p className="text-[11px] text-purple-600 mb-1">已转 否定商品(ASIN)</p>
+                                        <p className="text-lg font-semibold text-purple-700">{stats.asins}</p>
                                     </div>
                                 </div>
                             )}
 
-                            {/* 动作按钮 */}
                             <button 
                                 onClick={exportV3Excel}
                                 disabled={!processedData || processedData.length === 0}
                                 className={`w-full py-4 rounded-[16px] font-medium text-white transition-all duration-300 ${(!processedData || processedData.length === 0) ? 'bg-[#d2d2d7] cursor-not-allowed' : 'bg-[#0071e3] hover:bg-[#0077ED] shadow-[0_4px_14px_rgba(0,113,227,0.3)] hover:shadow-[0_6px_20px_rgba(0,113,227,0.4)]'}`}
                             >
-                                下载可直接上传的 V3 批量表
+                                下载终极版 V3 批量表
                             </button>
                         </div>
                     </div>
